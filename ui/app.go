@@ -938,6 +938,27 @@ const indexHTML = `<!doctype html>
       line-height:1.6;
       margin-bottom:10px;
     }
+    .pathWrap{display:flex; flex-direction:column; gap:4px}
+    .pathMain{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+    .pathBtn{
+      appearance:none;
+      border:1px solid rgba(255,255,255,0.10);
+      background:rgba(255,255,255,0.03);
+      color:rgba(255,255,255,0.80);
+      border-radius:999px;
+      padding:5px 10px;
+      cursor:pointer;
+      font-size:12px;
+      box-shadow:inset 0 1px 0 0 rgba(255,255,255,0.08);
+      transition:transform 220ms var(--ease-expo), border-color 220ms var(--ease-expo), background 220ms var(--ease-expo);
+    }
+    .pathBtn:hover{background:rgba(255,255,255,0.06); border-color:rgba(255,255,255,0.14); transform:translateY(-1px)}
+    .pathBtn:active{transform:scale(0.98)}
+    .pathFull{
+      color:rgba(255,255,255,0.70);
+      font-size:12px;
+      word-break:break-all;
+    }
 
     .codePanel{
       border-radius:14px;
@@ -991,18 +1012,11 @@ const indexHTML = `<!doctype html>
     }
     .hlSink{
       color:#ffd166;
-      background:rgba(255,209,102,0.10);
-      border:1px solid rgba(255,209,102,0.22);
+      background:rgba(255,209,102,0.18);
+      border:1px solid rgba(255,209,102,0.36);
       padding:1px 6px;
       border-radius:999px;
-    }
-    .hlSinkStrong{
-      color:#ffd166;
-      background:rgba(255,209,102,0.14);
-      border:1px solid rgba(255,209,102,0.32);
-      padding:1px 6px;
-      border-radius:999px;
-      box-shadow:0 0 0 1px rgba(0,0,0,0.35), 0 0 24px rgba(255,209,102,0.08);
+      box-shadow:0 0 0 1px rgba(0,0,0,0.35), 0 0 24px rgba(255,209,102,0.10);
     }
     .hlVar{
       color:#EDEDEF;
@@ -1134,7 +1148,16 @@ const indexHTML = `<!doctype html>
               <tr v-for="f in pagedFindings" :key="f.id" :class="{rowSelected: f.id === selectedId}" @click="selectFinding(f)">
                 <td><span class="badge" :class="sevClass(f.severity)">{{ (f.severity || '').toUpperCase() }}</span></td>
                 <td>{{ categoryLabel(f.category) }}</td>
-                <td class="mono" :title="f.file">{{ fileBase(f.file) }}:{{ f.line }}</td>
+                <td class="mono">
+                  <div class="pathWrap">
+                    <div class="pathMain">
+                      <span>{{ fileBase(f.file) }}:{{ f.line }}</span>
+                      <button class="pathBtn" @click.stop="copyText(f.file || '')">复制路径</button>
+                      <button class="pathBtn" @click.stop="copyText((f.file || '') + ':' + String(f.line || ''))">复制行</button>
+                    </div>
+                    <div class="pathFull">{{ toRelative(f.file) }}</div>
+                  </div>
+                </td>
                 <td :title="f.evidence">{{ simpleDesc(f) }}</td>
               </tr>
             </tbody>
@@ -1288,6 +1311,19 @@ const indexHTML = `<!doctype html>
             return parts[parts.length - 1] || String(p || '');
           }
 
+          function toRelative(p){
+            const root = (report.value && report.value.target) ? String(report.value.target) : '';
+            if(!root || !p){ return String(p || ''); }
+            const normRoot = root.replace(/[\\\/]+/g, '\\');
+            const normPath = String(p).replace(/[\\\/]+/g, '\\');
+            if(normPath.toLowerCase().startsWith(normRoot.toLowerCase())){
+              let rel = normPath.slice(normRoot.length);
+              rel = rel.replace(/^[\\\/]+/, '');
+              return rel || fileBase(p);
+            }
+            return String(p);
+          }
+
           function severityZh(sev){
             const s = String(sev || '').toLowerCase();
             if(s === 'high'){ return '高'; }
@@ -1384,7 +1420,7 @@ const indexHTML = `<!doctype html>
               html = wrapRegex(html, /(\$_(GET|POST|REQUEST|COOKIE|FILES|SERVER|ENV))\b/gi, 'hlSrc');
               if(sinkName){
                 const sinkRe = new RegExp(escapeRegExp(sinkName), 'gi');
-                html = wrapRegex(html, sinkRe, isSel ? 'hlSinkStrong' : 'hlSink');
+                html = wrapRegex(html, sinkRe, 'hlSink');
               }
               for(const v of keyVars){
                 const vr = new RegExp(escapeRegExp(v), 'g');
@@ -1673,6 +1709,7 @@ const indexHTML = `<!doctype html>
             sevClass,
             categoryLabel,
             fileBase,
+            toRelative,
             simpleDesc,
             spotlightMove,
             startScan,
