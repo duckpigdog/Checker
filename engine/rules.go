@@ -199,7 +199,7 @@ func DefaultRuleset() Ruleset {
 				{
 					Name: "dir_write",
 					Kind: SinkFunction,
-					Targets: []string{"mkdir", "rmdir"},
+					Targets: []string{"rmdir"},
 					ParamPositions: []int{1},
 					Predicate: func(args []string) bool {
 						if len(args) > 0 {
