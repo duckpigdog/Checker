@@ -202,8 +202,10 @@ func shouldIgnorePath(root, path string, patterns []string) bool {
 }
 
 type varState struct {
-	Tainted bool
-	Source  Trace
+	Tainted      bool
+	Source       Trace
+	XSSSanitized bool
+	SQLSanitized bool
 }
 
 var (
@@ -434,10 +436,57 @@ func processStatement(ctx context.Context, filePath string, s statement, rs Rule
 			varName := strings.TrimSpace(m[1])
 			rhs := strings.TrimSpace(m[2])
 			tainted, src := exprTaint(rhs, state, rs)
+			
+			xssSan := false
+			sqlSan := false
+			lowRhs := strings.ToLower(rhs)
+			if strings.Contains(lowRhs, "htmlspecialchars(") || strings.Contains(lowRhs, "htmlentities(") {
+				xssSan = true
+			}
+			if strings.Contains(lowRhs, "mysqli_real_escape_string(") || strings.Contains(lowRhs, "mysql_real_escape_string(") {
+				sqlSan = true
+			}
+			
+			if !xssSan || !sqlSan {
+				vars := reVarName.FindAllString(rhs, -1)
+				if len(vars) > 0 {
+					allXSSSan := true
+					allSQLSan := true
+					for _, v := range vars {
+						if st, ok := state[v]; ok && st.Tainted {
+							if !st.XSSSanitized {
+								allXSSSan = false
+							}
+							if !st.SQLSanitized {
+								allSQLSan = false
+							}
+						}
+					}
+					
+					// Only rely on variable status if the rhs itself doesn't introduce new direct taints
+					// unless those taints are the variables themselves.
+					// A simple check: if the expression minus the variables doesn't contain a source, we trust the vars.
+					cleanRhs := rhs
+					for _, v := range vars {
+						cleanRhs = strings.ReplaceAll(cleanRhs, v, "")
+					}
+					directTaint, _ := exprTaintDepth(cleanRhs, nil, rs, 0)
+					if !directTaint {
+						if allXSSSan {
+							xssSan = true
+						}
+						if allSQLSan {
+							sqlSan = true
+						}
+					}
+				}
+			}
+
 			if tainted {
-				state[varName] = varState{Tainted: true, Source: Trace{Kind: "source", File: filePath, Line: s.StartLine, Text: src}}
+				state[varName] = varState{Tainted: true, Source: Trace{Kind: "source", File: filePath, Line: s.StartLine, Text: src}, XSSSanitized: xssSan, SQLSanitized: sqlSan}
 			} else {
-				state[varName] = varState{Tainted: false}
+				// Also mark safe variables as safe
+				state[varName] = varState{Tainted: false, XSSSanitized: true, SQLSanitized: true}
 			}
 		}
 	}
@@ -462,6 +511,110 @@ func processStatement(ctx context.Context, filePath string, s statement, rs Rule
 
 				sev := cat.Severity
 				fixedHint := ""
+
+				if cat.Name == "xss" {
+					if strings.Contains(strings.ToLower(arg), "htmlspecialchars(") || strings.Contains(strings.ToLower(arg), "htmlentities(") {
+						continue
+					}
+					if matched, _ := regexp.MatchString(`(?i)(href|src)\s*=\s*['"]\.{1,2}/`, evidence); matched {
+						continue
+					}
+					
+					vars := reVarName.FindAllString(arg, -1)
+					if len(vars) > 0 {
+						allSan := true
+						hasTaintedVar := false
+						for _, v := range vars {
+							if st, ok := state[v]; ok && st.Tainted {
+								hasTaintedVar = true
+								if !st.XSSSanitized {
+									allSan = false
+									break
+								}
+							}
+						}
+						if hasTaintedVar && allSan {
+							cleanArg := arg
+							for _, v := range vars {
+								cleanArg = strings.ReplaceAll(cleanArg, v, "")
+							}
+							directTaint, _ := exprTaintDepth(cleanArg, nil, rs, 0)
+							if !directTaint {
+								continue
+							}
+						}
+					}
+				}
+
+				if cat.Name == "sqli" {
+					isSqlSanitizedLocally := false
+					if strings.Contains(strings.ToLower(arg), "mysqli_real_escape_string(") || strings.Contains(strings.ToLower(arg), "mysql_real_escape_string(") {
+						isSqlSanitizedLocally = true
+					}
+					
+					// Also check if the whole statement (evidence) contains the sanitizer
+					// Example: mysqli_query($conn, "SELECT * FROM users WHERE a = '" . mysqli_real_escape_string($conn, $a) . "'");
+					if strings.Contains(strings.ToLower(evidence), "mysqli_real_escape_string(") || strings.Contains(strings.ToLower(evidence), "mysql_real_escape_string(") {
+						isSqlSanitizedLocally = true
+					}
+
+					if isSqlSanitizedLocally {
+						continue
+					}
+					
+					vars := reVarName.FindAllString(arg, -1)
+					if len(vars) > 0 {
+						allSan := true
+						
+						// Create a helper to check variables recursively up to a depth
+						var checkVarSanitized func(vName string, depth int) bool
+						checkVarSanitized = func(vName string, depth int) bool {
+							if depth > 5 {
+								return false
+							}
+							st, ok := state[vName]
+							if !ok {
+								return true // not in state, assume clean
+							}
+							if !st.Tainted {
+								return true
+							}
+							if st.SQLSanitized {
+								return true
+							}
+							
+							// If not explicitly sanitized, but has a source, it's tainted
+							if st.Source.Text != "" {
+								return false
+							}
+							
+							return false
+						}
+						
+						for _, v := range vars {
+							if !checkVarSanitized(v, 0) {
+								allSan = false
+								break
+							}
+						}
+						
+						// If there's no explicitly tainted variable found among those used, 
+						// but checkVarSanitized didn't fail (so allSan is true), 
+						// we might still be dealing with variables that aren't strictly marked as tainted but carry data.
+						// The main logic is: if every variable is sanitized, and the rest of the string is clean, we are good.
+						if allSan {
+							cleanArg := arg
+							for _, v := range vars {
+								cleanArg = strings.ReplaceAll(cleanArg, v, "")
+							}
+							directTaint, _ := exprTaintDepth(cleanArg, nil, rs, 0)
+							if !directTaint {
+								continue
+							}
+						}
+					}
+				}
+
 				if isSanitized(arg, cat.Sanitizers, rs.InverseSanitizers) {
 					sev = SeverityLow
 					fixedHint = "detected sanitizer wrapper; verify context correctness"
@@ -1044,6 +1197,23 @@ func truncateOneLine(s string, max int) string {
 
 func stripComments(line string, inBlock *bool) string {
 	s := line
+
+	// Strip HTML comments first
+	for {
+		startHTML := strings.Index(s, "<!--")
+		if startHTML < 0 {
+			break
+		}
+		endHTML := strings.Index(s[startHTML+4:], "-->")
+		if endHTML >= 0 {
+			s = s[:startHTML] + s[startHTML+4+endHTML+3:]
+		} else {
+			// Unclosed HTML comment on this line, we strip the rest of the line
+			s = s[:startHTML]
+			break
+		}
+	}
+
 	if *inBlock {
 		if end := strings.Index(s, "*/"); end >= 0 {
 			s = s[end+2:]

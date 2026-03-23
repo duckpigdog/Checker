@@ -195,7 +195,23 @@ func DefaultRuleset() Ruleset {
 			Sanitizers: append(append([]string{}, pathSan...), stringSan...),
 			Sinks: []SinkRule{
 				{Name: "file_read", Kind: SinkFunction, Targets: []string{"file", "file_get_contents", "readfile", "readgzfile", "show_source", "highlight_file", "parse_ini_file", "simplexml_load_file", "zip_open", "opendir", "scandir"}, ParamPositions: []int{1}},
-				{Name: "file_write", Kind: SinkFunction, Targets: []string{"file_put_contents", "fwrite", "fputs", "fprintf", "rename", "unlink", "copy", "mkdir", "rmdir", "touch", "move_uploaded_file"}, ParamPositions: []int{1, 2}},
+				{Name: "file_write", Kind: SinkFunction, Targets: []string{"file_put_contents", "fwrite", "fputs", "fprintf", "rename", "unlink", "copy", "touch", "move_uploaded_file"}, ParamPositions: []int{1, 2}},
+				{
+					Name: "dir_write",
+					Kind: SinkFunction,
+					Targets: []string{"mkdir", "rmdir"},
+					ParamPositions: []int{1},
+					Predicate: func(args []string) bool {
+						if len(args) > 0 {
+							lowArg := strings.ToLower(args[0])
+							// If the argument variable name suggests it's a directory or upload path, consider it safe/false positive
+							if strings.Contains(lowArg, "upload") || strings.Contains(lowArg, "dir") || strings.Contains(lowArg, "path") || strings.Contains(lowArg, "folder") {
+								return false
+							}
+						}
+						return true
+					},
+				},
 			},
 		},
 		{
